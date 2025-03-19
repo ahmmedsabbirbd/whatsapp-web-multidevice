@@ -23,7 +23,6 @@ if (!fs.existsSync(SESSIONS_DIR)) {
     fs.mkdirSync(SESSIONS_DIR);
 }
 
-
 // Get all available sessions
 function getAvailableSessions() {
     if (!fs.existsSync(SESSIONS_DIR)) return [];
@@ -151,8 +150,49 @@ async function initializeAllSessions() {
     }
 }
 
+// Add this function to your server.js file
+async function completeSessionCleanup(sessionId) {
+    console.log(`Performing complete cleanup for session: ${sessionId}`);
+    
+    // 1. Close the socket if it exists
+    if (connections[sessionId]?.sock) {
+      try {
+        if (typeof connections[sessionId].sock.close === 'function') {
+          connections[sessionId].sock.close();
+        }
+      } catch (error) {
+        console.log(`Error closing socket: ${error.message}`);
+      }
+    }
+    
+    // 2. Remove from memory
+    delete connections[sessionId];
+    delete qrCodes[sessionId];
+    
+    // 3. Delete the directory
+    const sessionPath = path.join(SESSIONS_DIR, sessionId);
+    if (fs.existsSync(sessionPath)) {
+      try {
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+      } catch (error) {
+        console.log(`Error removing directory: ${error.message}`);
+        // Try again with a different method if rmSync fails
+        try {
+          const files = fs.readdirSync(sessionPath);
+          for (const file of files) {
+            fs.unlinkSync(path.join(sessionPath, file));
+          }
+          fs.rmdirSync(sessionPath);
+        } catch (err) {
+          console.log(`Second attempt failed: ${err.message}`);
+        }
+      }
+    }
+    
+    return { success: true };
+  }
+
 // API routes
-// Create a new session - improved with better validation
 app.post("/sessions/create", async (req, res) => {
     const { sessionId } = req.body;
     
@@ -161,32 +201,10 @@ app.post("/sessions/create", async (req, res) => {
     }
     
     try {
-        // Check if session already exists
-        if (connections[sessionId]) {
-            console.log(`Session ${sessionId} already exists. Closing and recreating.`);
-            
-            // Close existing connection if possible
-            try {
-                if (connections[sessionId].sock && typeof connections[sessionId].sock.close === 'function') {
-                    connections[sessionId].sock.close();
-                }
-            } catch (socketError) {
-                console.log(`Error closing existing socket: ${socketError.message}`);
-            }
-            
-            // Remove from memory
-            delete connections[sessionId];
-            delete qrCodes[sessionId];
-        }
+        // Always do a complete cleanup first, even if it doesn't exist
+        await completeSessionCleanup(sessionId);
         
-        // Check if session directory exists
-        const sessionPath = path.join(SESSIONS_DIR, sessionId);
-        if (fs.existsSync(sessionPath)) {
-            console.log(`Session directory exists. Removing for clean start: ${sessionPath}`);
-            fs.rmSync(sessionPath, { recursive: true, force: true });
-        }
-        
-        // Create new connection
+        // Now create a fresh connection
         console.log(`Creating new session: ${sessionId}`);
         await createConnection(sessionId);
         
@@ -256,61 +274,13 @@ app.get("/sessions", (req, res) => {
     res.json({ success: true, sessions: activeSessions });
 });
 
-// Delete a session - improved with better cleanup
-app.delete("/sessions/:sessionId", (req, res) => {
+// Replace your delete endpoint with this
+app.delete("/sessions/:sessionId", async (req, res) => {
     const { sessionId } = req.params;
     
     try {
-        // First, check if the session exists
-        if (connections[sessionId]) {
-            console.log(`Deleting session: ${sessionId}`);
-            
-            // Get the session path
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            
-            // 1. Close the socket connection if it exists
-            try {
-                if (connections[sessionId].sock && typeof connections[sessionId].sock.close === 'function') {
-                    connections[sessionId].sock.close();
-                }
-            } catch (socketError) {
-                console.log(`Error closing socket: ${socketError.message}`);
-                // Continue with deletion even if socket close fails
-            }
-            
-            // 2. Remove session directory
-            if (fs.existsSync(sessionPath)) {
-                console.log(`Removing session directory: ${sessionPath}`);
-                fs.rmSync(sessionPath, { recursive: true, force: true });
-            }
-            
-            // 3. Clean up session objects
-            console.log(`Removing session from memory`);
-            delete connections[sessionId];
-            delete qrCodes[sessionId];
-            
-            // 4. Provide success response
-            res.json({ 
-                success: true, 
-                message: "Session deleted successfully" 
-            });
-        } else {
-            // Session not found in connections, but directory might still exist
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            if (fs.existsSync(sessionPath)) {
-                console.log(`Session not in memory but directory exists. Removing: ${sessionPath}`);
-                fs.rmSync(sessionPath, { recursive: true, force: true });
-                res.json({ 
-                    success: true, 
-                    message: "Session directory deleted successfully" 
-                });
-            } else {
-                res.status(404).json({ 
-                    success: false, 
-                    error: "Session not found" 
-                });
-            }
-        }
+        const result = await completeSessionCleanup(sessionId);
+        res.json({ success: true, message: "Session deleted successfully" });
     } catch (error) {
         console.error(`Error deleting session ${sessionId}:`, error);
         res.status(500).json({ 
@@ -319,7 +289,6 @@ app.delete("/sessions/:sessionId", (req, res) => {
         });
     }
 });
-
 // Send a message using a specific session
 app.post("/send-message", async (req, res) => {
     const { sessionId, number, message } = req.body;
